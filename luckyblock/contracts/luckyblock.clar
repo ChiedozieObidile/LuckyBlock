@@ -13,6 +13,16 @@
 (define-constant ERR-LOTTERY-ENDED (err u108))
 (define-constant ERR-INVALID-WINNERS (err u109))
 (define-constant ERR-TOO-MANY-WINNERS (err u110))
+(define-constant ERR-INVALID-TICKET-PRICE (err u111))
+(define-constant ERR-INVALID-MIN-PLAYERS (err u112))
+(define-constant ERR-INVALID-MIN-BLOCKS (err u113))
+
+;; Constants for input validation
+(define-constant MIN-TICKET-PRICE u100000)  ;; 0.1 STX
+(define-constant MAX-TICKET-PRICE u100000000)  ;; 100 STX
+(define-constant MAX-MIN-PLAYERS u20)  ;; Maximum value for minimum players
+(define-constant MIN-BLOCKS-LOWER u50)  ;; Minimum value for min-blocks
+(define-constant MIN-BLOCKS-UPPER u1000)  ;; Maximum value for min-blocks
 
 ;; Data variables
 (define-data-var current-lottery-id uint u0)
@@ -327,6 +337,10 @@
 (define-public (set-ticket-price (new-price uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (and 
+            (>= new-price MIN-TICKET-PRICE)
+            (<= new-price MAX-TICKET-PRICE)
+        ) ERR-INVALID-TICKET-PRICE)
         (var-set ticket-price new-price)
         (ok true)
     )
@@ -335,6 +349,10 @@
 (define-public (set-min-players (new-min uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (and 
+            (> new-min u0)
+            (<= new-min MAX-MIN-PLAYERS)
+        ) ERR-INVALID-MIN-PLAYERS)
         (var-set min-players new-min)
         (ok true)
     )
@@ -343,6 +361,10 @@
 (define-public (set-min-blocks (new-min uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (and 
+            (>= new-min MIN-BLOCKS-LOWER)
+            (<= new-min MIN-BLOCKS-UPPER)
+        ) ERR-INVALID-MIN-BLOCKS)
         (var-set min-blocks new-min)
         (ok true)
     )
