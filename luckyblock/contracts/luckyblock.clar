@@ -1,4 +1,4 @@
-;; LuckyBlock - A verifiable on-chain lottery system
+;; LuckyBlock - A verifiable on-chain lottery system with multiple winners
 ;; A fair, decentralized lottery using block information for randomness
 
 ;; Error codes
@@ -11,6 +11,8 @@
 (define-constant ERR-TOO-EARLY (err u106))
 (define-constant ERR-INVALID-AMOUNT (err u107))
 (define-constant ERR-LOTTERY-ENDED (err u108))
+(define-constant ERR-INVALID-WINNERS (err u109))
+(define-constant ERR-TOO-MANY-WINNERS (err u110))
 
 ;; Data variables
 (define-data-var current-lottery-id uint u0)
@@ -18,6 +20,7 @@
 (define-data-var ticket-price uint u1000000) ;; 1 STX default
 (define-data-var min-players uint u2)
 (define-data-var min-blocks uint u100)
+(define-data-var winner-count uint u3) ;; Default number of winners
 (define-data-var contract-owner principal tx-sender)
 (define-data-var last-random-seed uint u0)
 
@@ -30,7 +33,7 @@
         total-pot: uint,
         start-block: uint,
         end-block: uint,
-        winner: (optional principal),
+        winners: (list 10 {winner: principal, prize: uint}),
         status: (string-ascii 20),
         random-seed: uint
     }
@@ -41,16 +44,12 @@
     uint
 )
 
-(define-map random-seeds
-    uint
-    {
-        block-height: uint,
-        block-time: uint,
-        participant-count: uint
-    }
-)
+;; Helper functions
+(define-private (min-of (a uint) (b uint))
+    (if (<= a b)
+        a
+        b))
 
-;; Private functions
 (define-private (can-start-lottery)
     (let (
         (current-lottery (unwrap! (map-get? lotteries (var-get current-lottery-id)) false))
@@ -87,6 +86,101 @@
     (mod seed max)
 )
 
+(define-private (calculate-prize (total-pot uint) (position uint) (total-winners uint))
+    (let (
+        (base-prize (/ total-pot total-winners))
+        (bonus (if (is-eq position u0) 
+            (mod total-pot total-winners)
+            u0
+        ))
+    )
+        (+ base-prize bonus)
+    )
+)
+
+(define-private (get-next-winner 
+    (winners (list 10 {winner: principal, prize: uint}))
+    (participants (list 50 principal))
+    (seed uint)
+    (total-pot uint)
+    (total-winners uint))
+    (let (
+        (participant-count (len participants))
+        (selected-index (get-random-number seed participant-count))
+        (winner (unwrap! (element-at participants selected-index) winners))
+        (current-count (len winners))
+    )
+        (if (>= current-count total-winners)
+            winners
+            (unwrap! 
+                (as-max-len? 
+                    (append winners {
+                        winner: winner,
+                        prize: (calculate-prize total-pot current-count total-winners)
+                    })
+                    u10
+                )
+                winners
+            )
+        )
+    )
+)
+
+(define-private (select-winners (lottery-id uint) (participants (list 50 principal)) (total-pot uint))
+    (let (
+        (participant-count (len participants))
+        (winners-needed (min-of (var-get winner-count) participant-count))
+        (initial-seed (generate-random-seed))
+    )
+        (if (> winners-needed u0)
+            (ok (fold add-winner
+                (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10)
+                {
+                    winners: (list),
+                    candidates: participants,
+                    seed: initial-seed,
+                    needed: winners-needed,
+                    pot: total-pot
+                }
+            ))
+            (err u100)
+        )
+    )
+)
+
+(define-private (add-winner
+    (index uint)
+    (state {
+        winners: (list 10 {winner: principal, prize: uint}),
+        candidates: (list 50 principal),
+        seed: uint,
+        needed: uint,
+        pot: uint
+    }))
+    (let (
+        (current-winners (get winners state))
+        (remaining-candidates (get candidates state))
+        (current-count (len current-winners))
+    )
+        (if (>= current-count (get needed state))
+            state
+            {
+                winners: (get-next-winner 
+                    current-winners 
+                    remaining-candidates 
+                    (+ (get seed state) index)
+                    (get pot state)
+                    (get needed state)
+                ),
+                candidates: remaining-candidates,
+                seed: (get seed state),
+                needed: (get needed state),
+                pot: (get pot state)
+            }
+        )
+    )
+)
+
 ;; Public functions
 (define-public (initialize-lottery)
     (let (
@@ -104,7 +198,7 @@
                     total-pot: u0,
                     start-block: block-height,
                     end-block: (+ block-height (var-get min-blocks)),
-                    winner: none,
+                    winners: (list),
                     status: "active",
                     random-seed: init-seed
                 }
@@ -148,7 +242,7 @@
                     total-pot: (+ (get total-pot current-lottery) (var-get ticket-price)),
                     start-block: (get start-block current-lottery),
                     end-block: (get end-block current-lottery),
-                    winner: (get winner current-lottery),
+                    winners: (get winners current-lottery),
                     status: (get status current-lottery),
                     random-seed: (get random-seed current-lottery)
                 }
@@ -158,13 +252,13 @@
     )
 )
 
-(define-public (draw-winner)
+(define-public (draw-winners)
     (let (
         (lottery-id (var-get current-lottery-id))
         (current-lottery (unwrap! (map-get? lotteries lottery-id) ERR-NO-LOTTERY-ACTIVE))
         (participants (get participants current-lottery))
         (participant-count (len participants))
-        (final-seed (generate-random-seed))
+        (winners-result (try! (select-winners lottery-id participants (get total-pot current-lottery))))
     )
         (begin
             (asserts! (>= block-height (+ (get start-block current-lottery) (var-get min-blocks))) ERR-TOO-EARLY)
@@ -172,34 +266,36 @@
             (asserts! (is-eq (get status current-lottery) "active") ERR-LOTTERY-ENDED)
             
             (let (
-                (selected-index (get-random-number final-seed participant-count))
-                (winner (unwrap! (element-at participants selected-index) ERR-NO-PARTICIPANTS))
+                (final-winners (get winners winners-result))
             )
                 (begin
-                    ;; Update lottery with winner
+                    ;; Update lottery with winners
                     (map-set lotteries lottery-id
                         (merge current-lottery 
                             {
-                                winner: (some winner),
+                                winners: final-winners,
                                 status: "completed",
-                                random-seed: final-seed
+                                random-seed: (var-get last-random-seed)
                             }
                         )
                     )
                     
-                    ;; Transfer prize to winner
-                    (try! (as-contract (stx-transfer? 
-                        (get total-pot current-lottery)
-                        tx-sender 
-                        winner
-                    )))
+                    ;; Transfer prizes to winners
+                    (map transfer-prize final-winners)
                     
-                    (var-set last-random-seed final-seed)
-                    (ok winner)
+                    (ok final-winners)
                 )
             )
         )
     )
+)
+
+(define-private (transfer-prize (winner {winner: principal, prize: uint}))
+    (as-contract (stx-transfer? 
+        (get prize winner)
+        tx-sender 
+        (get winner winner)
+    ))
 )
 
 ;; Read-only functions
@@ -217,6 +313,10 @@
 
 (define-read-only (get-ticket-price)
     (var-get ticket-price)
+)
+
+(define-read-only (get-winner-count)
+    (var-get winner-count)
 )
 
 (define-read-only (get-last-random-seed)
@@ -244,6 +344,16 @@
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
         (var-set min-blocks new-min)
+        (ok true)
+    )
+)
+
+(define-public (set-winner-count (new-count uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (<= new-count u10) ERR-TOO-MANY-WINNERS)
+        (asserts! (> new-count u0) ERR-INVALID-WINNERS)
+        (var-set winner-count new-count)
         (ok true)
     )
 )
