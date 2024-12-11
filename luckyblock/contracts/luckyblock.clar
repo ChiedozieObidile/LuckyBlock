@@ -1,5 +1,5 @@
 ;; LuckyBlock - A verifiable on-chain lottery system
-;; A fair, decentralized lottery using block properties for randomness
+;; A fair, decentralized lottery using block information for randomness
 
 ;; Error codes
 (define-constant ERR-NOT-AUTHORIZED (err u100))
@@ -19,6 +19,7 @@
 (define-data-var min-players uint u2)
 (define-data-var min-blocks uint u100)
 (define-data-var contract-owner principal tx-sender)
+(define-data-var last-random-seed uint u0)
 
 ;; Data maps
 (define-map lotteries
@@ -30,13 +31,23 @@
         start-block: uint,
         end-block: uint,
         winner: (optional principal),
-        status: (string-ascii 20)
+        status: (string-ascii 20),
+        random-seed: uint
     }
 )
 
 (define-map participant-tickets
     {lottery-id: uint, participant: principal}
     uint
+)
+
+(define-map random-seeds
+    uint
+    {
+        block-height: uint,
+        block-time: uint,
+        participant-count: uint
+    }
 )
 
 ;; Private functions
@@ -63,19 +74,24 @@
     )
 )
 
-(define-private (get-entropy)
+(define-private (generate-random-seed)
     (let (
-        (current-time (unwrap! (get-block-info? time block-height) u0))
-        (prev-time (unwrap! (get-block-info? time (- block-height u1)) u0))
+        (current-time (default-to u0 (get-block-info? time block-height)))
+        (prev-time (default-to u0 (get-block-info? time (- block-height u1))))
     )
-        (+ current-time prev-time)
+        (mod (+ (* current-time u113) (* prev-time u151)) u1000000000)
     )
+)
+
+(define-private (get-random-number (seed uint) (max uint))
+    (mod seed max)
 )
 
 ;; Public functions
 (define-public (initialize-lottery)
     (let (
         (new-lottery-id (+ (var-get current-lottery-id) u1))
+        (init-seed (generate-random-seed))
     )
         (begin
             (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
@@ -89,11 +105,13 @@
                     start-block: block-height,
                     end-block: (+ block-height (var-get min-blocks)),
                     winner: none,
-                    status: "active"
+                    status: "active",
+                    random-seed: init-seed
                 }
             )
             (var-set current-lottery-id new-lottery-id)
             (var-set lottery-start-height block-height)
+            (var-set last-random-seed init-seed)
             (ok new-lottery-id)
         )
     )
@@ -131,7 +149,8 @@
                     start-block: (get start-block current-lottery),
                     end-block: (get end-block current-lottery),
                     winner: (get winner current-lottery),
-                    status: (get status current-lottery)
+                    status: (get status current-lottery),
+                    random-seed: (get random-seed current-lottery)
                 }
             )
             (ok true)
@@ -145,6 +164,7 @@
         (current-lottery (unwrap! (map-get? lotteries lottery-id) ERR-NO-LOTTERY-ACTIVE))
         (participants (get participants current-lottery))
         (participant-count (len participants))
+        (final-seed (generate-random-seed))
     )
         (begin
             (asserts! (>= block-height (+ (get start-block current-lottery) (var-get min-blocks))) ERR-TOO-EARLY)
@@ -152,7 +172,7 @@
             (asserts! (is-eq (get status current-lottery) "active") ERR-LOTTERY-ENDED)
             
             (let (
-                (selected-index (mod (get-entropy) participant-count))
+                (selected-index (get-random-number final-seed participant-count))
                 (winner (unwrap! (element-at participants selected-index) ERR-NO-PARTICIPANTS))
             )
                 (begin
@@ -161,7 +181,8 @@
                         (merge current-lottery 
                             {
                                 winner: (some winner),
-                                status: "completed"
+                                status: "completed",
+                                random-seed: final-seed
                             }
                         )
                     )
@@ -173,6 +194,7 @@
                         winner
                     )))
                     
+                    (var-set last-random-seed final-seed)
                     (ok winner)
                 )
             )
@@ -195,6 +217,10 @@
 
 (define-read-only (get-ticket-price)
     (var-get ticket-price)
+)
+
+(define-read-only (get-last-random-seed)
+    (var-get last-random-seed)
 )
 
 ;; Admin functions
